@@ -1,6 +1,6 @@
 use super::{Spoiler, SpoilerSource};
 use crate::cache::Cache;
-use futures::{future, stream::FuturesUnordered, Stream, StreamExt};
+use futures::{stream::FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
 use scraper::{
     node::{Comment, Text},
@@ -16,10 +16,24 @@ fn based(s: &str) -> String {
     format!("{BASE}/{s}")
 }
 
-pub async fn new_cards<Db: Cache + 'static>(db: Db) -> reqwest::Result<Vec<Spoiler>> {
-    let doc = request_page().await?;
-    let doc = Html::parse_document(&doc);
-    Ok(parse_document(db, &doc).collect().await)
+pub async fn new_cards<Db: Cache + 'static>(mut db: Db) -> reqwest::Result<Vec<Spoiler>> {
+    let mut spoilers = {
+        let doc = request_page().await?;
+        let doc = Html::parse_document(&doc);
+        parse_document(&doc)
+            .filter(|c| db.is_new(c))
+            .collect::<Vec<_>>()
+    };
+    FuturesUnordered::from_iter(spoilers.iter_mut().map(get_card_name))
+        .for_each(|_| async {})
+        .await;
+    Ok(spoilers)
+}
+
+#[allow(dead_code)]
+fn _assert() {
+    fn is_send<T: Send>(_: T) {}
+    is_send(new_cards(super::cache::empty::Empty));
 }
 
 async fn request_page() -> reqwest::Result<String> {
@@ -31,19 +45,14 @@ async fn request_page() -> reqwest::Result<String> {
         .await
 }
 
-fn parse_document<Db: Cache + 'static>(
-    mut db: Db,
-    doc: &'_ Html,
-) -> impl Stream<Item = Spoiler> + '_ {
-    FuturesUnordered::from_iter(
-        doc.select(&Selector::parse("div.grid-card").unwrap())
-            .map(parse_card),
-    )
-    .filter_map(future::ready)
-    .filter(move |s| future::ready(db.is_new(s)))
+fn parse_document(doc: &'_ Html) -> impl Iterator<Item = Spoiler> + '_ {
+    lazy_static! {
+        static ref CARD: Selector = Selector::parse("div.grid-card").unwrap();
+    };
+    doc.select(&CARD).filter_map(parse_card)
 }
 
-async fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
+fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
     lazy_static! {
         static ref LINK: Selector = Selector::parse("a").unwrap();
         static ref IMG: Selector = Selector::parse("img").unwrap();
@@ -67,7 +76,6 @@ async fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
      * </div>
      */
     let card_link = card.select(&LINK).next()?;
-    let card_url_in_mythic_site = card_link.value().attr("href")?;
     let img = card_link.select(&IMG).next()?.value().attr("src")?.trim();
     let source = 'source: {
         let Some(source) = card.select(&SOURCE).next() else {
@@ -91,14 +99,25 @@ async fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
 
     Some(Spoiler {
         image: based(img.trim()),
-        name: get_card_name(&based(card_url_in_mythic_site.trim())).await,
+        name: None,
         source,
     })
 }
 
-async fn get_card_name(url: &str) -> Option<String> {
-    let Some(doc) = CLIENT.get(url).send().await.ok()?.text().await.ok() else {
-        return Some("no-network".to_string())
+async fn get_card_name(spoiler: &mut Spoiler) {
+    let mut url = String::with_capacity(spoiler.image.len() + 1);
+    url.push_str(
+        spoiler
+            .image
+            .trim_end_matches("jpg")
+            .trim_end_matches("png"),
+    );
+    url.push_str("html");
+    let Ok(response) = CLIENT.get(&url).send().await else {
+        return;
+    };
+    let Ok(doc) = response.text().await else {
+        return;
     };
     let doc = Html::parse_document(&doc);
     for f in doc.select(&Selector::parse("font").unwrap()) {
@@ -113,7 +132,8 @@ async fn get_card_name(url: &str) -> Option<String> {
                 .map(|s| s.trim())
                 .find(|s| !s.is_empty())
             {
-                return Some(name.to_string());
+                spoiler.name = Some(name.to_string());
+                return;
             }
         }
     }
@@ -130,17 +150,16 @@ async fn get_card_name(url: &str) -> Option<String> {
             _ => None,
         }
     }
-    None
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::NeverSeenAny;
+    use crate::cache::empty::Empty;
 
     #[tokio::test]
     async fn foo() {
-        let cards = new_cards(NeverSeenAny).await.unwrap();
+        let cards = new_cards(Empty).await.unwrap();
         assert_ne!(cards.len(), 0);
     }
 }
