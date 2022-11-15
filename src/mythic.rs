@@ -35,6 +35,7 @@ pub async fn new_cards<Db: Cache + Send + 'static>(mut db: Db) -> Result<Vec<Spo
             .collect::<Vec<_>>()
     };
     db.persist().await?;
+    spoilers.reverse();
     FuturesUnordered::from_iter(spoilers.iter_mut().map(get_card_name))
         .for_each(|_| async {})
         .await;
