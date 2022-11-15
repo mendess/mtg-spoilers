@@ -21,7 +21,7 @@ impl File {
     pub async fn new<P: Into<PathBuf>>(path: P) -> io::Result<Self> {
         let path = path.into();
         let set = Self::load(&path).await?;
-        println!("loaded {} cards", set.len());
+        log::trace!("loaded {} cards", set.len());
         Ok(Self { set, path })
     }
 
@@ -58,26 +58,23 @@ impl Cache for File {
     }
 
     async fn persist(self) -> io::Result<()> {
-        eprintln!("[mtg-spoilers] saving cache to file");
         let base = self.path.parent().unwrap_or_else(|| Path::new("/"));
         let tmp = match tempfile::NamedTempFile::new_in(base) {
             Ok(tmp) => tmp,
             Err(e) => {
-                eprintln!("[mtg-spoilers] failed to create temporary file, writing to original file: {e:?}");
+                log::error!("[mtg-spoilers] failed to create temporary file, writing to original file: {e:?}");
                 return fallback(self.set, self.path).await;
             }
         };
         let (tmp_file, tmp_path) = tmp.into_parts();
         let writer = BufWriter::new(fs::File::from_std(tmp_file));
-        println!("saving to disk: {tmp_path:?}");
         if let Err(e) = Self::save(writer, self.set.iter()).await {
-            eprintln!("[mtg-spoilers] couldn't save to tmp file: {e:?}");
+            log::error!("[mtg-spoilers] couldn't save to tmp file: {e:?}");
             return fallback(self.set, self.path).await;
         }
-        println!("saved");
         tokio::time::sleep(Duration::from_secs(60)).await;
         if let Err(e) = tokio::fs::rename(tmp_path, &self.path).await {
-            eprintln!("[mtg-spoilers] overwrite original file: {e:?}");
+            log::error!("[mtg-spoilers] overwrite original file: {e:?}");
             return fallback(self.set, self.path).await;
         }
         return Ok(());
@@ -86,13 +83,13 @@ impl Cache for File {
             let file = match fs::File::create(&path).await {
                 Ok(file) => file,
                 Err(e) => {
-                    eprintln!("[mtg-spoilers] can't open original file: {e:?}");
+                    log::error!("[mtg-spoilers] can't open original file: {e:?}");
                     return Err(e);
                 }
             };
             let writer = BufWriter::new(file);
             if let Err(e) = File::save(writer, set).await {
-                eprintln!("[mtg-spoilers] can't write to original file: {e:?}");
+                log::error!("[mtg-spoilers] can't write to original file: {e:?}");
                 return Err(e);
             }
             Ok(())
