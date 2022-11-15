@@ -1,3 +1,5 @@
+use std::io;
+
 use super::{Spoiler, SpoilerSource};
 use crate::cache::Cache;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -16,7 +18,15 @@ fn based(s: &str) -> String {
     format!("{BASE}/{s}")
 }
 
-pub async fn new_cards<Db: Cache + 'static>(mut db: Db) -> reqwest::Result<Vec<Spoiler>> {
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Reqwest({0})")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("Io({0})")]
+    Io(#[from] io::Error),
+}
+
+pub async fn new_cards<Db: Cache + Send + 'static>(mut db: Db) -> Result<Vec<Spoiler>, Error> {
     let mut spoilers = {
         let doc = request_page().await?;
         let doc = Html::parse_document(&doc);
@@ -24,6 +34,7 @@ pub async fn new_cards<Db: Cache + 'static>(mut db: Db) -> reqwest::Result<Vec<S
             .filter(|c| db.is_new(c))
             .collect::<Vec<_>>()
     };
+    db.persist().await?;
     FuturesUnordered::from_iter(spoilers.iter_mut().map(get_card_name))
         .for_each(|_| async {})
         .await;
@@ -76,6 +87,7 @@ fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
      * </div>
      */
     let card_link = card.select(&LINK).next()?;
+    let card_url_in_mythic_site = card_link.value().attr("href")?;
     let img = card_link.select(&IMG).next()?.value().attr("src")?.trim();
     let source = 'source: {
         let Some(source) = card.select(&SOURCE).next() else {
@@ -106,6 +118,7 @@ fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
 
     Some(Spoiler {
         image: based(img.trim()),
+        source_site_url: based(card_url_in_mythic_site.trim()),
         name: None,
         source,
     })

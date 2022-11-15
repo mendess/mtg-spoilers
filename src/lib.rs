@@ -10,6 +10,7 @@ pub struct SpoilerSource {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Spoiler {
     pub name: Option<String>,
+    pub source_site_url: String,
     pub image: String,
     pub source: Option<SpoilerSource>,
 }
