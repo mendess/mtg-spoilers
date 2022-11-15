@@ -4,7 +4,7 @@ pub mod mythic;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpoilerSource {
     pub name: String,
-    pub url: String,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

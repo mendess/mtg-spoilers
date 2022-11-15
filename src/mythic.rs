@@ -108,10 +108,12 @@ fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
             name: source_name.trim().to_string(),
             url: {
                 let source_link = source_link.trim();
-                if !source_link.starts_with("http") {
-                    format!("http://{source_link}")
+                if source_link.is_empty() {
+                    None
+                } else if !source_link.starts_with("http") {
+                    Some(format!("http://{source_link}"))
                 } else {
-                    source_link.to_string()
+                    Some(source_link.to_string())
                 }
             },
         })
