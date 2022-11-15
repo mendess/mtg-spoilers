@@ -93,7 +93,14 @@ fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
 
         Some(SpoilerSource {
             name: source_name.trim().to_string(),
-            url: source_link.trim().to_string(),
+            url: {
+                let source_link = source_link.trim();
+                if !source_link.starts_with("http") {
+                    format!("http://{source_link}")
+                } else {
+                    source_link.to_string()
+                }
+            },
         })
     };
 
