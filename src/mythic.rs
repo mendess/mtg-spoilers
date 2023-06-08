@@ -1,17 +1,14 @@
-use std::io;
+use std::{io, sync::OnceLock};
 
 use super::{Spoiler, SpoilerSource};
 use crate::cache::Cache;
 use futures::{stream::FuturesUnordered, StreamExt};
-use lazy_static::lazy_static;
 use scraper::{
     node::{Comment, Text},
     ElementRef, Html, Node, Selector,
 };
 
-lazy_static! {
-    static ref CLIENT: reqwest::Client = reqwest::Client::new();
-}
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn based(s: &str) -> String {
     static BASE: &str = "http://mythicspoiler.com/";
@@ -50,6 +47,7 @@ fn _assert() {
 
 async fn request_page() -> reqwest::Result<String> {
     CLIENT
+        .get_or_init(reqwest::Client::new)
         .get(based("newspoilers.html"))
         .send()
         .await?
@@ -58,19 +56,20 @@ async fn request_page() -> reqwest::Result<String> {
 }
 
 fn parse_document(doc: &'_ Html) -> impl Iterator<Item = Spoiler> + '_ {
-    lazy_static! {
-        static ref CARD: Selector = Selector::parse("div.grid-card").unwrap();
-    };
-    doc.select(&CARD).filter_map(parse_card)
+    static CARD: OnceLock<Selector> = OnceLock::new();
+    let card = CARD.get_or_init(|| Selector::parse("div.grid-card").unwrap());
+    doc.select(card).filter_map(parse_card)
 }
 
 fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
-    lazy_static! {
-        static ref LINK: Selector = Selector::parse("a").unwrap();
-        static ref IMG: Selector = Selector::parse("img").unwrap();
-        static ref SOURCE: Selector = Selector::parse("center").unwrap();
-        static ref FONT: Selector = Selector::parse("font").unwrap();
-    };
+    static LINK: OnceLock<Selector> = OnceLock::new();
+    static IMG: OnceLock<Selector> = OnceLock::new();
+    static SOURCE: OnceLock<Selector> = OnceLock::new();
+    static FONT: OnceLock<Selector> = OnceLock::new();
+    let link = LINK.get_or_init(|| Selector::parse("a").unwrap());
+    let img = IMG.get_or_init(|| Selector::parse("img").unwrap());
+    let source = SOURCE.get_or_init(|| Selector::parse("center").unwrap());
+    let font = FONT.get_or_init(|| Selector::parse("font").unwrap());
     /*
      * <div class="grid-card">
      *  <a href="brw/cards/jalumtome.html">
@@ -87,20 +86,20 @@ fn parse_card(card: ElementRef<'_>) -> Option<Spoiler> {
      *  </center>
      * </div>
      */
-    let card_link = card.select(&LINK).next()?;
+    let card_link = card.select(link).next()?;
     let card_url_in_mythic_site = card_link.value().attr("href")?;
-    let img = card_link.select(&IMG).next()?.value().attr("src")?.trim();
+    let img = card_link.select(img).next()?.value().attr("src")?.trim();
     let source = 'source: {
-        let Some(source) = card.select(&SOURCE).next() else {
+        let Some(source) = card.select(source).next() else {
             break 'source None;
         };
-        let Some(source_link_element) = source.select(&LINK).next() else {
+        let Some(source_link_element) = source.select(link).next() else {
             break 'source None;
         };
         let Some(source_link) = source_link_element.value().attr("href") else {
             break 'source None;
         };
-        let Some(source_name) = card.select(&FONT).next().and_then(|s| s.text().next()) else {
+        let Some(source_name) = card.select(font).next().and_then(|s| s.text().next()) else {
             break 'source None;
         };
 
@@ -136,7 +135,7 @@ async fn get_card_name(spoiler: &mut Spoiler) {
             .trim_end_matches("png"),
     );
     url.push_str("html");
-    let Ok(response) = CLIENT.get(&url).send().await else {
+    let Ok(response) = CLIENT.get_or_init(reqwest::Client::new).get(&url).send().await else {
         return;
     };
     let Ok(doc) = response.text().await else {
