@@ -17,4 +17,5 @@ thiserror = "1.0.37"
 tokio = { version = "1.21.2", features = ["fs", "macros", "rt", "rt-multi-thread"] }
 
 [dev-dependencies]
+paste = "1.0.14"
 tokio = { version = "1.21.2", features = ["macros", "fs", "rt-multi-thread", "rt"] }

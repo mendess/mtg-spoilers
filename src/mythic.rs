@@ -3,6 +3,7 @@ use std::{io, sync::OnceLock};
 use super::{Spoiler, SpoilerSource};
 use crate::cache::Cache;
 use futures::{stream::FuturesUnordered, StreamExt};
+use reqwest::Url;
 use scraper::{
     node::{Comment, Text},
     ElementRef, Html, Node, Selector,
@@ -174,6 +175,87 @@ async fn get_card_name(spoiler: &mut Spoiler) {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CardText {
+    pub name: Option<String>,
+    pub type_line: Option<String>,
+    pub text: Option<String>,
+}
+
+pub async fn get_card_text(url: Url) -> Result<Vec<CardText>, Error> {
+    let text = reqwest::get(url).await?.text().await?;
+
+    static CARD: OnceLock<Selector> = OnceLock::new();
+    let doc = Html::parse_document(&text);
+    let table = CARD.get_or_init(|| Selector::parse("td").unwrap());
+
+    let mut texts = vec![CardText::default()];
+    for table in doc.select(table) {
+        if let Some(comment) = table.children().find_map(|e| match e.value() {
+            Node::Comment(c) => Some(c),
+            _ => None,
+        }) {
+            match comment.comment.trim() {
+                "TYPE" => {
+                    let Some(parsed_type_line) = table.text().map(|t| t.trim()).find(|t| !t.is_empty()) else {
+                        continue;
+                    };
+                    let type_line = &mut texts.last_mut().unwrap().type_line;
+                    let parsed_type_line = Some(parsed_type_line.to_owned());
+                    if type_line.is_none() {
+                        *type_line = parsed_type_line;
+                    } else {
+                        texts.push(CardText {
+                            type_line: parsed_type_line,
+                            ..Default::default()
+                        });
+                    }
+                }
+                "CARD TEXT" => {
+                    let parsed_text = {
+                        let mut parsed_text = table.text().collect::<String>();
+                        let trimmed_start = parsed_text
+                            .char_indices()
+                            .find(|(_, c)| !c.is_whitespace())
+                            .map(|(i, _)| i);
+
+                        let trimmed_end = parsed_text
+                            .char_indices()
+                            .filter(|(_, c)| !c.is_whitespace())
+                            .last()
+                            .map(|(i, _)| i);
+
+                        match (trimmed_start, trimmed_end) {
+                            (Some(start), Some(end)) => {
+                                let new_length = end - start + 1;
+                                parsed_text.drain(..start);
+                                parsed_text.drain(new_length..);
+                                Some(parsed_text.replace("\n\n\n", "\n\n").replace(" \n", "\n"))
+                            }
+                            _ => None,
+                        }
+                    };
+                    let text = &mut texts.last_mut().unwrap().text;
+                    if text.is_none() {
+                        *text = parsed_text;
+                    } else {
+                        texts.push(CardText {
+                            text: parsed_text,
+                            ..Default::default()
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if texts == [CardText::default()] {
+        Ok(vec![])
+    } else {
+        Ok(texts)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -184,4 +266,84 @@ mod test {
         let cards = new_cards(Empty).await.unwrap();
         assert_ne!(cards.len(), 0);
     }
+
+    macro_rules! test_card_parser {
+        ($($exp:literal / $name:expr => [$({name: $e_name:expr, type_line: $e_type:expr, text: $e_text:expr}),*$(,)?])*) => {
+            $(paste::paste! {
+                #[tokio::test]
+                async fn [<get_ $name>]() {
+                    let text = get_card_text(
+                        Url::parse(::std::concat!("https://mythicspoiler.com/", $exp, "/cards/", $name, ".html")).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+
+                    let texts: [CardText; test_card_parser!(@count $($e_name),*)] = text.try_into().unwrap();
+                    texts
+                        .into_iter()
+                        .zip([$((Option::from($e_name), Option::from($e_type), Option::from($e_text))),*])
+                        .for_each(|(got, (name, type_line, text))| {
+                            assert_eq!(got.name.as_deref(), name);
+                            assert_eq!(got.type_line.as_deref(), type_line);
+                            assert_eq!(
+                                got.text.as_deref(),
+                                text
+                            );
+                        });
+                }
+            })*
+        };
+
+        (@count) => { 0 };
+        (@count $_:expr$(, $tail:tt)*) => {
+            1 + test_card_parser!(@count $($tail)*)
+        };
+    }
+
+    test_card_parser! {
+        "woe" / "gingerbreadhunter" => [
+            {name: None, type_line: "Creature - Giant", text: "When Gingerbread Hunter enters the battlefield, create a Food Token."},
+            {name: None, type_line: "Adventure - Instant", text: "Target creature gets -2/-2 until end of turn."},
+        ]
+        "woe" / "ragingfirebolt" => [
+            {name: None, type_line: "Instant", text: "Raging Firebolt deals X damage to target creature, where X is 2 plus the number of instants, sorceries, and cards with adventure in your graveyard."}
+        ]
+        "woe" / "picklockprankster" => []
+        "one" / "vraskabetrayalssting" => [
+            {name: None, type_line: "Legendary Planeswalker - Vraska", text: "
+Compleated ([B/P] can be paid with B, or 2 life. If life was paid, this planeswalker enters with two fewer loyalty counters.)
+
+[0]: You draw a card and you lose 1 life.
+Proliferate.
+
+[-2]: Target creature becomes a Treasure artifact with \"T: Sacrifice this artifact: Add one mana of any color\" and oses all other card types and abilities.
+
+[-9]: If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.
+".trim()}
+        ]
+    }
+
+    // #[tokio::test]
+    // async fn get_gingerbread_hunter() {
+    //     let text = get_card_text(
+    //         Url::parse("https://mythicspoiler.com/woe/cards/gingerbreadhunter.html").unwrap(),
+    //     )
+    //     .await
+    //     .unwrap();
+
+    //     let [main_card, adventure]: [CardText; 2] = text.try_into().unwrap();
+    //     assert_eq!(main_card.name, None);
+    //     assert_eq!(main_card.type_line.as_deref(), Some(""));
+    //     assert_eq!(
+    //         main_card.text.as_deref(),
+    //         Some("When Gingerbread Hunter enters the battlefield, create a Food Token.")
+    //     );
+
+    //     assert_eq!(adventure.name, None);
+    //     assert_eq!(adventure.type_line.as_deref(), Some("Adventure - Instant"));
+    //     assert_eq!(
+    //         adventure.text.as_deref(),
+    //         Some("Target creature gets -2/-2 until end of turn.")
+    //     );
+    // }
 }
