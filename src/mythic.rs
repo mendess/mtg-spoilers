@@ -1,42 +1,41 @@
-use std::{io, sync::OnceLock};
+use std::sync::OnceLock;
 
 use super::{Spoiler, SpoilerSource};
-use crate::cache::Cache;
-use futures::{stream::FuturesUnordered, StreamExt};
+use crate::{cache::Cache, http, CardText, Error};
+use futures::StreamExt;
 use reqwest::Url;
 use scraper::{
     node::{Comment, Text},
     ElementRef, Html, Node, Selector,
 };
 
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
 fn based(s: &str) -> String {
     static BASE: &str = "http://mythicspoiler.com/";
     format!("{BASE}/{s}")
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Reqwest({0})")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("Io({0})")]
-    Io(#[from] io::Error),
-}
-
+#[tracing::instrument(skip_all)]
 pub async fn new_cards<Db: Cache + Send + 'static>(mut db: Db) -> Result<Vec<Spoiler>, Error> {
     let mut spoilers = {
+        tracing::trace!("requesting page");
         let doc = request_page().await?;
+        tracing::trace!("parsing document");
         let doc = Html::parse_document(&doc);
         parse_document(&doc)
             .filter(|c| db.is_new(c))
             .collect::<Vec<_>>()
     };
+    tracing::trace!("persisting cache");
     db.persist().await?;
+    tracing::trace!("reversing spoilers list");
     spoilers.reverse();
-    FuturesUnordered::from_iter(spoilers.iter_mut().map(get_card_name))
-        .for_each(|_| async {})
+    tracing::trace!(count = spoilers.len(), "getting card names");
+    let now = std::time::Instant::now();
+    futures::stream::iter(spoilers.iter_mut())
+        .for_each_concurrent(None, get_card_name)
         .await;
+
+    tracing::trace!(elapsed = ?now.elapsed(), "done getting card names");
     Ok(spoilers)
 }
 
@@ -47,8 +46,7 @@ fn _assert() {
 }
 
 async fn request_page() -> reqwest::Result<String> {
-    CLIENT
-        .get_or_init(reqwest::Client::new)
+    http()
         .get(based("newspoilers.html"))
         .send()
         .await?
@@ -136,7 +134,7 @@ async fn get_card_name(spoiler: &mut Spoiler) {
             .trim_end_matches("png"),
     );
     url.push_str("html");
-    let Ok(response) = CLIENT.get_or_init(reqwest::Client::new).get(&url).send().await else {
+    let Ok(response) = http().get(&url).send().await else {
         return;
     };
     let Ok(doc) = response.text().await else {
@@ -175,13 +173,6 @@ async fn get_card_name(spoiler: &mut Spoiler) {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct CardText {
-    pub name: Option<String>,
-    pub type_line: Option<String>,
-    pub text: Option<String>,
-}
-
 pub async fn get_card_text(url: Url) -> Result<Vec<CardText>, Error> {
     let text = reqwest::get(url).await?.text().await?;
 
@@ -197,7 +188,9 @@ pub async fn get_card_text(url: Url) -> Result<Vec<CardText>, Error> {
         }) {
             match comment.comment.trim() {
                 "TYPE" => {
-                    let Some(parsed_type_line) = table.text().map(|t| t.trim()).find(|t| !t.is_empty()) else {
+                    let Some(parsed_type_line) =
+                        table.text().map(|t| t.trim()).find(|t| !t.is_empty())
+                    else {
                         continue;
                     };
                     let type_line = &mut texts.last_mut().unwrap().type_line;

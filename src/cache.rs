@@ -1,17 +1,17 @@
 pub mod empty;
 pub mod file;
 
-use std::io;
+use std::{future::Future, io};
 
 use super::Spoiler;
 
-#[async_trait::async_trait]
 pub trait Cache {
     fn is_new(&mut self, spoiler: &Spoiler) -> bool;
-    async fn persist(self) -> io::Result<()>
+
+    fn persist(self) -> impl Future<Output = io::Result<()>> + Send
     where
         Self: Sized,
     {
-        Ok(())
+        async { Ok(()) }
     }
 }

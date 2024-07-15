@@ -15,6 +15,16 @@ scraper = "0.13.0"
 tempfile = "3.3.0"
 thiserror = "1.0.37"
 tokio = { version = "1.21.2", features = ["fs", "macros", "rt", "rt-multi-thread"] }
+tracing = { version = "0.1.40", features = ["async-await"] }
+tracing-subscriber = { version = "0.3.18", optional = true, features = ["env-filter"] }
+
+[features]
+binary = ["dep:tracing-subscriber"]
+
+[[bin]]
+name = "new_cards"
+path = "src/bin/new_cards.rs"
+required-features = ["binary"]
 
 [dev-dependencies]
 paste = "1.0.14"
