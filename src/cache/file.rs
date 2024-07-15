@@ -51,7 +51,6 @@ impl File {
     }
 }
 
-#[async_trait::async_trait]
 impl Cache for File {
     fn is_new(&mut self, spoiler: &crate::Spoiler) -> bool {
         self.set.insert(spoiler.image.clone())
